@@ -6,7 +6,17 @@ CC = gcc
 MPICC = mpicc
 CFLAGS = -Wall -O3 -std=c99
 # Detect if we're using clang (macOS) or gcc (Linux)
-OPENMP_FLAGS = $(shell if $(CC) --version 2>&1 | grep -q clang; then echo "-Xpreprocessor -fopenmp -lomp"; else echo "-fopenmp"; fi)
+# Add OpenMP include/library paths for macOS Homebrew
+OPENMP_PREFIX = $(shell brew --prefix libomp 2>/dev/null || echo "")
+OPENMP_FLAGS = $(shell if $(CC) --version 2>&1 | grep -q clang; then \
+    if [ -n "$(OPENMP_PREFIX)" ]; then \
+        echo "-Xpreprocessor -fopenmp -I$(OPENMP_PREFIX)/include -L$(OPENMP_PREFIX)/lib -lomp"; \
+    else \
+        echo "-Xpreprocessor -fopenmp -lomp"; \
+    fi; \
+else \
+    echo "-fopenmp"; \
+fi)
 PTHREAD_FLAGS = -lpthread
 MPI_FLAGS = 
 MATH_FLAGS = -lm
@@ -99,6 +109,19 @@ test-mpi: $(BUILD_DIR)/mpi_version
 	@echo "=== Testing MPI Version ==="
 	mpirun -np 4 ./$(BUILD_DIR)/mpi_version 100
 
+# Test MPI with oversubscribe (cho phép nhiều processes hơn số cores)
+test-mpi-over:
+	@echo "=== Testing MPI Version with Oversubscribe ==="
+	mpirun --oversubscribe -np 3 ./$(BUILD_DIR)/mpi_version 100
+	@echo ""
+	mpirun --oversubscribe -np 5 ./$(BUILD_DIR)/mpi_version 200  
+	@echo ""
+	mpirun --oversubscribe -np 7 ./$(BUILD_DIR)/mpi_version 300
+	@echo ""
+	mpirun --oversubscribe -np 9 ./$(BUILD_DIR)/mpi_version 400
+	@echo ""
+	mpirun --oversubscribe -np 11 ./$(BUILD_DIR)/mpi_version 500
+
 # Clean build files
 clean:
 	rm -rf $(BUILD_DIR)
@@ -118,6 +141,7 @@ help:
 	@echo "  test               - Chạy test cơ bản"
 	@echo "  test-performance   - Chạy test hiệu năng"
 	@echo "  test-mpi          - Chạy test MPI"
+	@echo "  test-mpi-over     - Chạy test MPI with oversubscribe"
 	@echo "  clean             - Xóa file build"
 	@echo "  help              - Hiển thị trợ giúp này"
 	@echo ""
