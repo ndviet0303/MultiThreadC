@@ -1,25 +1,73 @@
-#include "utils.h"
+/**
+ * GAUSSIAN ELIMINATION - PHIÊN BẢN MPI
+ * Giải hệ phương trình tuyến tính với distributed memory parallelism
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
 #include <mpi.h>
 
+// Cấu trúc lưu trữ hệ phương trình
+typedef struct {
+    double **A;     // Ma trận hệ số n x n
+    double *b;      // Vector hằng số
+    double *x;      // Vector nghiệm
+    int n;          // Kích thước ma trận
+} LinearSystem;
+
 /**
- * Tạo ma trận test cố định để đảm bảo khả nghịch (tránh random seed issue)
+ * Tạo hệ phương trình mới với kích thước n x n
  */
-void generate_fixed_test_system(LinearSystem *sys) {
+LinearSystem* create_system(int n) {
+    LinearSystem *sys = malloc(sizeof(LinearSystem));
+    sys->n = n;
+    
+    sys->A = malloc(n * sizeof(double*));
+    for (int i = 0; i < n; i++) {
+        sys->A[i] = malloc(n * sizeof(double));
+    }
+    
+    sys->b = malloc(n * sizeof(double));
+    sys->x = malloc(n * sizeof(double));
+    
+    return sys;
+}
+
+/**
+ * Giải phóng bộ nhớ
+ */
+void free_system(LinearSystem *sys) {
+    if (!sys) return;
+    
+    for (int i = 0; i < sys->n; i++) {
+        free(sys->A[i]);
+    }
+    free(sys->A);
+    free(sys->b);
+    free(sys->x);
+    free(sys);
+}
+
+/**
+ * Tạo hệ phương trình test với ma trận dominant diagonal
+ */
+void generate_test_system(LinearSystem *sys) {
     int n = sys->n;
     
-    // Ma trận diagonal dominant để đảm bảo khả nghịch
+    // Tạo ma trận A với đường chéo chính lớn (đảm bảo khả nghịch)
     for (int i = 0; i < n; i++) {
         for (int j = 0; j < n; j++) {
             if (i == j) {
-                sys->A[i][j] = n + 5.0;  // Đường chéo chính lớn
+                sys->A[i][j] = n + 10.0;  // Đường chéo chính lớn
             } else {
-                sys->A[i][j] = 1.0 / (i + j + 1.0);  // Giá trị nhỏ khác
+                sys->A[i][j] = 1.0 / (i + j + 1.0);  // Phần tử khác nhỏ
             }
         }
     }
     
-    // Vector nghiệm cố định: x[i] = i + 1
-    double *true_x = (double*)malloc(n * sizeof(double));
+    // Tạo vector nghiệm x cố định: x[i] = i + 1
+    double *true_x = malloc(n * sizeof(double));
     for (int i = 0; i < n; i++) {
         true_x[i] = i + 1.0;
     }
@@ -33,6 +81,27 @@ void generate_fixed_test_system(LinearSystem *sys) {
     }
     
     free(true_x);
+}
+
+/**
+ * Kiểm tra tính đúng đắn nghiệm bằng cách tính A*x so với b
+ */
+int verify_solution(LinearSystem *sys) {
+    int n = sys->n;
+    double tolerance = 1e-9;
+    
+    for (int i = 0; i < n; i++) {
+        double sum = 0.0;
+        for (int j = 0; j < n; j++) {
+            sum += sys->A[i][j] * sys->x[j];
+        }
+        
+        if (fabs(sum - sys->b[i]) > tolerance) {
+            return 0;  // Nghiệm không chính xác
+        }
+    }
+    
+    return 1;  // Nghiệm chính xác
 }
 
 /**
@@ -64,13 +133,12 @@ int gaussian_elimination_mpi(LinearSystem *sys, int rank, int size) {
     }
     
     // Buffer để lưu trữ hàng pivot
-    double *pivot_row = (double*)malloc((n + 1) * sizeof(double));
+    double *pivot_row = malloc((n + 1) * sizeof(double));
     
     // Giai đoạn 1: Khử xuôi
     for (int k = 0; k < n - 1; k++) {
-        int pivot_owner = -1;
         int global_pivot_row = k;
-        double global_pivot_value = 0.0;
+        int pivot_owner = -1;
         
         // Xác định process nào sở hữu hàng k
         for (int i = 0; i < size; i++) {
@@ -122,23 +190,46 @@ int gaussian_elimination_mpi(LinearSystem *sys, int rank, int size) {
         // Kiểm tra tính khả nghịch
         if (fabs(pivot_row[k]) < 1e-12) {
             if (rank == 0) {
-                printf("Lỗi: Ma trận không khả nghịch tại k=%d, pivot=%.12f\n", k, pivot_row[k]);
+                printf("Lỗi: Ma trận không khả nghịch (pivot ≈ 0)\n");
             }
             free(pivot_row);
             return 0;
         }
         
-        // Hoán đổi hàng nếu cần (đơn giản hóa để tránh deadlock)
+        // Hoán đổi hàng thông minh: swap giữa processes
         if (global_pivot_row != k) {
-            // Chỉ process chứa hàng k cập nhật với pivot_row
-            if (k >= start_row && k < end_row) {
-                // Process này chứa hàng k, thay thế bằng pivot_row
+            if (rank == pivot_owner) {
+                // Process owns hàng k: gửi hàng k cho process có pivot
+                if (k >= start_row && k < end_row) {
+                    MPI_Send(A[k], n, MPI_DOUBLE, global_max.rank, k, MPI_COMM_WORLD);
+                    MPI_Send(&b[k], 1, MPI_DOUBLE, global_max.rank, k + n, MPI_COMM_WORLD);
+                }
+            }
+            
+            if (rank == global_max.rank && rank != pivot_owner) {
+                // Process có pivot: nhận hàng k và thay thế
+                double *temp_row = malloc(n * sizeof(double));
+                double temp_b;
+                MPI_Recv(temp_row, n, MPI_DOUBLE, pivot_owner, k, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                MPI_Recv(&temp_b, 1, MPI_DOUBLE, pivot_owner, k + n, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                
+                // Swap trong local storage
+                if (global_pivot_row >= start_row && global_pivot_row < end_row) {
+                    for (int j = 0; j < n; j++) {
+                        A[global_pivot_row][j] = temp_row[j];
+                    }
+                    b[global_pivot_row] = temp_b;
+                }
+                free(temp_row);
+            }
+            
+            // Process owns hàng k: nhận pivot row
+            if (rank == pivot_owner && k >= start_row && k < end_row) {
                 for (int j = 0; j < n; j++) {
                     A[k][j] = pivot_row[j];
                 }
                 b[k] = pivot_row[n];
             }
-            // Bỏ qua việc hoán đổi phức tạp để tránh deadlock
         }
         
         // Thực hiện khử trong phần của mình
@@ -196,7 +287,36 @@ int gaussian_elimination_mpi(LinearSystem *sys, int rank, int size) {
 }
 
 /**
- * Chương trình test phiên bản MPI
+ * In ma trận (chỉ khi n <= 10)
+ */
+void print_matrix(LinearSystem *sys) {
+    int n = sys->n;
+    if (n > 10) return;
+    
+    printf("Ma trận A:\n");
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n; j++) {
+            printf("%8.2f ", sys->A[i][j]);
+        }
+        printf("\n");
+    }
+}
+
+/**
+ * In vector (chỉ khi n <= 10)
+ */
+void print_vector(double *v, int n, const char *name) {
+    if (n > 10) return;
+    
+    printf("%s: ", name);
+    for (int i = 0; i < n; i++) {
+        printf("%.2f ", v[i]);
+    }
+    printf("\n");
+}
+
+/**
+ * Chương trình chính
  */
 int main(int argc, char *argv[]) {
     int rank, size;
@@ -219,7 +339,7 @@ int main(int argc, char *argv[]) {
     }
     
     if (rank == 0) {
-        printf("=== PHIÊN BẢN MPI - GAUSSIAN ELIMINATION ===\n");
+        printf("🧮 GAUSSIAN ELIMINATION - PHIÊN BẢN MPI\n");
         printf("Kích thước ma trận: %d x %d\n", n, n);
         printf("Số processes: %d\n\n", size);
     }
@@ -227,15 +347,14 @@ int main(int argc, char *argv[]) {
     // Tạo hệ phương trình (mỗi process tạo bản sao)
     LinearSystem *sys = create_system(n);
     
-    // Chỉ process 0 tạo dữ liệu test (sử dụng ma trận cố định)
+    // Chỉ process 0 tạo dữ liệu test
     if (rank == 0) {
-        generate_fixed_test_system(sys);
+        generate_test_system(sys);
         
         // Hiển thị ma trận nếu nhỏ
         if (n <= 10) {
-            print_matrix(sys->A, n);
-            printf("Vector b: ");
-            print_vector(sys->b, n);
+            print_matrix(sys);
+            print_vector(sys->b, n, "Vector b");
             printf("\n");
         }
     }
@@ -262,8 +381,7 @@ int main(int argc, char *argv[]) {
             
             // Hiển thị nghiệm nếu ma trận nhỏ
             if (n <= 10) {
-                printf("Nghiệm x: ");
-                print_vector(sys->x, n);
+                print_vector(sys->x, n, "Nghiệm x");
             }
             
             // Kiểm tra tính đúng đắn của nghiệm
@@ -275,7 +393,7 @@ int main(int argc, char *argv[]) {
             
             // Thông tin về hiệu năng
             printf("\n📊 Thông tin hiệu năng:\n");
-            printf("   - Số processes đã sử dụng: %d\n", size);
+            printf("   - Số processes: %d\n", size);
             printf("   - Thời gian: %.6f giây\n", elapsed_time);
             
         } else {
@@ -289,5 +407,5 @@ int main(int argc, char *argv[]) {
     // Kết thúc MPI
     MPI_Finalize();
     
-    return 0;
+    return success ? 0 : 1;
 } 

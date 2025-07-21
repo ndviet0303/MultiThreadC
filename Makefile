@@ -1,180 +1,141 @@
-# Makefile cho Gaussian Elimination - Tất cả phiên bản
-# Hỗ trợ Sequential, OpenMP, Pthreads, MPI
-
-# Compiler và flags
+# Makefile cho 4 phiên bản Gaussian Elimination
 CC = gcc
-MPICC = mpicc
-CFLAGS = -Wall -O3 -std=c99
-# Detect if we're using clang (macOS) or gcc (Linux)
-# Add OpenMP include/library paths for macOS Homebrew
-OPENMP_PREFIX = $(shell brew --prefix libomp 2>/dev/null || echo "")
-OPENMP_FLAGS = $(shell if $(CC) --version 2>&1 | grep -q clang; then \
-    if [ -n "$(OPENMP_PREFIX)" ]; then \
-        echo "-Xpreprocessor -fopenmp -I$(OPENMP_PREFIX)/include -L$(OPENMP_PREFIX)/lib -lomp"; \
-    else \
-        echo "-Xpreprocessor -fopenmp -lomp"; \
-    fi; \
-else \
-    echo "-fopenmp"; \
-fi)
-PTHREAD_FLAGS = -lpthread
-MPI_FLAGS = 
-MATH_FLAGS = -lm
+CFLAGS = -Wall -O2 -lm
 
-# Thư mục và file
-SRC_DIR = .
+# Thư mục output
 BUILD_DIR = build
-UTILS_SRC = utils.c
-UTILS_OBJ = $(BUILD_DIR)/utils.o
 
-# Danh sách các target chính
-EXECUTABLES = main_demo sequential openmp_version pthread_version mpi_version performance_test
+# OpenMP: macOS cần homebrew gcc và libomp
+# Ubuntu/Linux dùng gcc system
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+    # macOS: sử dụng homebrew gcc và libomp
+    OPENMP_CC := $(shell which gcc-15 2>/dev/null || which gcc-14 2>/dev/null || which gcc-13 2>/dev/null || echo "clang")
+    LIBOMP_PREFIX := $(shell brew --prefix libomp 2>/dev/null || echo "/opt/homebrew/opt/libomp")
+    ifeq ($(OPENMP_CC),clang)
+        # Fallback: clang với libomp từ homebrew
+        OPENMP_FLAGS = -Xpreprocessor -fopenmp -I$(LIBOMP_PREFIX)/include -L$(LIBOMP_PREFIX)/lib -lomp
+    else
+        # Sử dụng homebrew gcc
+        OPENMP_FLAGS = -fopenmp -I$(LIBOMP_PREFIX)/include -L$(LIBOMP_PREFIX)/lib
+    endif
+else
+    # Linux: dùng gcc system
+    OPENMP_CC = gcc
+    OPENMP_FLAGS = -fopenmp
+endif
 
-.PHONY: all clean help test install setup main_demo
-
-# Disable implicit rules
-.SUFFIXES:
-
-# Build tất cả
-all: $(BUILD_DIR) $(EXECUTABLES)
+# MPI compiler
+MPICC = mpicc
 
 # Tạo thư mục build
 $(BUILD_DIR):
-	mkdir -p $(BUILD_DIR)
+	@mkdir -p $(BUILD_DIR)
 
-# Build utils.o (dùng chung cho tất cả)
-$(UTILS_OBJ): $(UTILS_SRC) utils.h | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -c $(UTILS_SRC) -o $(UTILS_OBJ) $(MATH_FLAGS)
+# Build tất cả
+all: $(BUILD_DIR) sequential openmp pthread mpi
 
-# Build main demo
-main_demo: $(BUILD_DIR)/main_demo
-$(BUILD_DIR)/main_demo: main.c $(UTILS_OBJ) | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -o $@ main.c $(UTILS_OBJ) $(MATH_FLAGS)
+# Phiên bản tuần tự
+sequential: $(BUILD_DIR) sequential.c
+	$(CC) $(CFLAGS) -o $(BUILD_DIR)/sequential sequential.c
+	@echo "✅ Sequential build thành công → $(BUILD_DIR)/sequential"
 
-# Build phiên bản tuần tự
-sequential: $(BUILD_DIR)/sequential
-$(BUILD_DIR)/sequential: sequential.c $(UTILS_OBJ) | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -o $@ sequential.c $(UTILS_OBJ) $(MATH_FLAGS)
+# Phiên bản OpenMP
+openmp: $(BUILD_DIR) openmp.c
+	@echo "Building OpenMP version..."
+	@if $(OPENMP_CC) $(CFLAGS) $(OPENMP_FLAGS) -o $(BUILD_DIR)/openmp openmp.c 2>/dev/null; then \
+		echo "✅ OpenMP build thành công → $(BUILD_DIR)/openmp"; \
+	else \
+		echo "❌ OpenMP build thất bại"; \
+		echo "💡 Cài đặt: brew install gcc libomp (macOS) hoặc apt install libgomp1 (Linux)"; \
+		exit 1; \
+	fi
 
-# Build phiên bản OpenMP
-openmp_version: $(BUILD_DIR)/openmp_version
-$(BUILD_DIR)/openmp_version: openmp_version.c $(UTILS_OBJ) | $(BUILD_DIR)
-	$(CC) $(CFLAGS) $(OPENMP_FLAGS) -o $@ openmp_version.c $(UTILS_OBJ) $(MATH_FLAGS)
+# Phiên bản Pthread
+pthread: $(BUILD_DIR) pthread.c
+	$(CC) $(CFLAGS) -pthread -o $(BUILD_DIR)/pthread pthread.c
+	@echo "✅ Pthread build thành công → $(BUILD_DIR)/pthread"
 
-# Build phiên bản Pthread
-pthread_version: $(BUILD_DIR)/pthread_version
-$(BUILD_DIR)/pthread_version: pthread_version.c $(UTILS_OBJ) | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -o $@ pthread_version.c $(UTILS_OBJ) $(PTHREAD_FLAGS) $(MATH_FLAGS)
+# Phiên bản MPI
+mpi: $(BUILD_DIR) mpi.c
+	@echo "Building MPI version..."
+	@if command -v $(MPICC) >/dev/null 2>&1; then \
+		$(MPICC) $(CFLAGS) -o $(BUILD_DIR)/mpi mpi.c && echo "✅ MPI build thành công → $(BUILD_DIR)/mpi"; \
+	else \
+		echo "❌ MPI compiler không tìm thấy"; \
+		echo "💡 Cài đặt: brew install open-mpi (macOS) hoặc apt install libopenmpi-dev (Linux)"; \
+		exit 1; \
+	fi
 
-# Build phiên bản MPI
-mpi_version: $(BUILD_DIR)/mpi_version
-$(BUILD_DIR)/mpi_version: mpi_version.c $(UTILS_OBJ) | $(BUILD_DIR)
-	$(MPICC) $(CFLAGS) $(MPI_FLAGS) -o $@ mpi_version.c $(UTILS_OBJ) $(MATH_FLAGS)
+# Test nhanh - chỉ test các phiên bản build được
+test-small: sequential pthread
+	@echo "=== TEST SEQUENTIAL ==="
+	$(BUILD_DIR)/sequential 10
+	@echo "\n=== TEST PTHREAD ==="
+	$(BUILD_DIR)/pthread 10 4
+	@if [ -f "$(BUILD_DIR)/openmp" ]; then \
+		echo "\n=== TEST OPENMP ==="; \
+		$(BUILD_DIR)/openmp 10 4; \
+	else \
+		echo "\n⚠️  OpenMP chưa build (cần: brew install gcc libomp)"; \
+	fi
+	@if [ -f "$(BUILD_DIR)/mpi" ] && command -v mpirun >/dev/null 2>&1; then \
+		echo "\n=== TEST MPI ==="; \
+		mpirun -np 4 $(BUILD_DIR)/mpi 10; \
+	else \
+		echo "\n⚠️  MPI chưa build (cần: brew install open-mpi)"; \
+	fi
 
-# Build chương trình test hiệu năng (cần objects từ sequential, openmp, pthread)
-$(BUILD_DIR)/sequential_lib.o: sequential.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -c sequential.c -o $@ $(MATH_FLAGS) -DLIB_MODE
+# Test tất cả (bỏ qua lỗi)
+test-all: 
+	@$(MAKE) all || true
+	@$(MAKE) test-small
 
-$(BUILD_DIR)/openmp_lib.o: openmp_version.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) $(OPENMP_FLAGS) -c openmp_version.c -o $@ $(MATH_FLAGS) -DLIB_MODE
+# Test hiệu năng
+test-performance: all
+	@echo "=== PERFORMANCE TEST (n=500) ==="
+	@echo "Sequential:"
+	@time $(BUILD_DIR)/sequential 500
+	@if [ -f "$(BUILD_DIR)/openmp" ]; then \
+		echo "\nOpenMP (4 threads):"; \
+		time $(BUILD_DIR)/openmp 500 4; \
+	fi
+	@if [ -f "$(BUILD_DIR)/pthread" ]; then \
+		echo "\nPthread (4 threads):"; \
+		time $(BUILD_DIR)/pthread 500 4; \
+	fi
+	@if [ -f "$(BUILD_DIR)/mpi" ]; then \
+		echo "\nMPI (4 processes):"; \
+		time mpirun -np 4 $(BUILD_DIR)/mpi 500; \
+	fi
 
-$(BUILD_DIR)/pthread_lib.o: pthread_version.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -c pthread_version.c -o $@ $(MATH_FLAGS) -DLIB_MODE
-
-performance_test: $(BUILD_DIR)/performance_test
-$(BUILD_DIR)/performance_test: performance_test.c $(UTILS_OBJ) $(BUILD_DIR)/sequential_lib.o $(BUILD_DIR)/openmp_lib.o $(BUILD_DIR)/pthread_lib.o | $(BUILD_DIR)
-	$(CC) $(CFLAGS) $(OPENMP_FLAGS) -o $@ performance_test.c $(UTILS_OBJ) $(BUILD_DIR)/sequential_lib.o $(BUILD_DIR)/openmp_lib.o $(BUILD_DIR)/pthread_lib.o $(PTHREAD_FLAGS) $(MATH_FLAGS)
-
-# Chạy test đơn giản
-test: all
-	@echo "=== Running Main Demo ==="
-	./$(BUILD_DIR)/main_demo
-	@echo ""
-	@echo "=== Testing Sequential Version ==="
-	./$(BUILD_DIR)/sequential 10
-	@echo ""
-	@echo "=== Testing OpenMP Version ==="
-	./$(BUILD_DIR)/openmp_version 10 4
-	@echo ""
-	@echo "=== Testing Pthread Version ==="
-	./$(BUILD_DIR)/pthread_version 10 4
-
-# Chạy test hiệu năng với kích thước nhỏ
-test-performance: $(BUILD_DIR)/performance_test
-	@echo "=== Running Performance Test ==="
-	./$(BUILD_DIR)/performance_test 200
-
-# Chạy test MPI (cần mpirun)
-test-mpi: $(BUILD_DIR)/mpi_version
-	@echo "=== Testing MPI Version ==="
-	mpirun -np 4 ./$(BUILD_DIR)/mpi_version 100
-
-# Test MPI with oversubscribe (cho phép nhiều processes hơn số cores)
-test-mpi-over:
-	@echo "=== Testing MPI Version with Oversubscribe ==="
-	mpirun --oversubscribe -np 3 ./$(BUILD_DIR)/mpi_version 100
-	@echo ""
-	mpirun --oversubscribe -np 5 ./$(BUILD_DIR)/mpi_version 200  
-	@echo ""
-	mpirun --oversubscribe -np 7 ./$(BUILD_DIR)/mpi_version 300
-	@echo ""
-	mpirun --oversubscribe -np 9 ./$(BUILD_DIR)/mpi_version 400
-	@echo ""
-	mpirun --oversubscribe -np 11 ./$(BUILD_DIR)/mpi_version 500
-
-# Clean build files
+# Dọn dẹp
 clean:
 	rm -rf $(BUILD_DIR)
-	rm -f performance_results.csv
-	rm -f *.o core
+	@echo "🗑️  Đã xóa thư mục $(BUILD_DIR)/"
 
-# Hiển thị trợ giúp
+# Trợ giúp
 help:
-	@echo "Available targets:"
-	@echo "  all                 - Build tất cả phiên bản"
-	@echo "  main_demo           - Build chương trình demo chính"
-	@echo "  sequential          - Build phiên bản tuần tự"
-	@echo "  openmp_version      - Build phiên bản OpenMP"
-	@echo "  pthread_version     - Build phiên bản Pthread"
-	@echo "  mpi_version         - Build phiên bản MPI"
-	@echo "  performance_test    - Build chương trình test hiệu năng"
-	@echo "  test               - Chạy test cơ bản"
-	@echo "  test-performance   - Chạy test hiệu năng"
-	@echo "  test-mpi          - Chạy test MPI"
-	@echo "  test-mpi-over     - Chạy test MPI with oversubscribe"
-	@echo "  clean             - Xóa file build"
-	@echo "  help              - Hiển thị trợ giúp này"
+	@echo "Gaussian Elimination - Parallel Computing"
 	@echo ""
-	@echo "Usage examples:"
-	@echo "  make all                                    # Build tất cả"
-	@echo "  ./build/sequential 1000                    # Chạy sequential với n=1000"
-	@echo "  ./build/openmp_version 1000 8              # OpenMP với 8 threads"
-	@echo "  ./build/pthread_version 1000 4             # Pthread với 4 threads"
-	@echo "  mpirun -np 4 ./build/mpi_version 1000      # MPI với 4 processes"
-	@echo "  ./build/performance_test 500               # Test hiệu năng với n=500"
+	@echo "Targets:"
+	@echo "  all              - Build tất cả 4 phiên bản"
+	@echo "  sequential       - Build phiên bản tuần tự"
+	@echo "  openmp          - Build phiên bản OpenMP"
+	@echo "  pthread         - Build phiên bản Pthread"
+	@echo "  mpi             - Build phiên bản MPI"
+	@echo "  test-small      - Test nhanh (10x10)"
+	@echo "  test-performance - Test hiệu năng (500x500)"
+	@echo "  clean           - Xóa executables"
+	@echo "  help            - Hiển thị trợ giúp"
+	@echo ""
+	@echo "Usage:"
+	@echo "  $(BUILD_DIR)/sequential [n]           - Chạy tuần tự"
+	@echo "  $(BUILD_DIR)/openmp [n] [threads]     - Chạy OpenMP"
+	@echo "  $(BUILD_DIR)/pthread [n] [threads]    - Chạy Pthread"
+	@echo "  mpirun -np [procs] $(BUILD_DIR)/mpi [n] - Chạy MPI"
+	@echo ""
+	@echo "File outputs:"
+	@echo "  All executables → $(BUILD_DIR)/"
 
-# Thiết lập quyền execute cho script
-setup:
-	chmod +x run_tests.sh
-	@echo "✅ Setup completed! Script executable."
-
-# Kiểm tra dependencies
-check-deps:
-	@echo "Checking dependencies..."
-	@which gcc > /dev/null || (echo "ERROR: gcc not found"; exit 1)
-	@which mpicc > /dev/null || (echo "WARNING: mpicc not found, MPI version will not work")
-	@echo "Dependencies OK"
-
-# Install (copy executables to system path - optional)
-install: all
-	@echo "Installing to /usr/local/bin (requires sudo)..."
-	sudo cp $(BUILD_DIR)/sequential /usr/local/bin/gaussian-sequential
-	sudo cp $(BUILD_DIR)/openmp_version /usr/local/bin/gaussian-openmp
-	sudo cp $(BUILD_DIR)/pthread_version /usr/local/bin/gaussian-pthread
-	sudo cp $(BUILD_DIR)/performance_test /usr/local/bin/gaussian-performance
-	@echo "Installation complete!"
-
-# Debug build
-debug: CFLAGS += -g -DDEBUG
-debug: all
-	@echo "Debug build completed" 
+.PHONY: all test-small test-performance clean help 

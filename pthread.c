@@ -1,5 +1,21 @@
-#include "utils.h"
+/**
+ * GAUSSIAN ELIMINATION - PHIÊN BẢN PTHREAD
+ * Giải hệ phương trình tuyến tính với manual thread management
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+#include <time.h>
 #include <pthread.h>
+
+// Cấu trúc lưu trữ hệ phương trình
+typedef struct {
+    double **A;     // Ma trận hệ số n x n
+    double *b;      // Vector hằng số
+    double *x;      // Vector nghiệm
+    int n;          // Kích thước ma trận
+} LinearSystem;
 
 // Cấu trúc dữ liệu cho các luồng tìm pivot
 typedef struct {
@@ -19,6 +35,94 @@ typedef struct {
     int end_row;
     int k;              // Bước khử hiện tại
 } EliminationThreadData;
+
+/**
+ * Tạo hệ phương trình mới với kích thước n x n
+ */
+LinearSystem* create_system(int n) {
+    LinearSystem *sys = malloc(sizeof(LinearSystem));
+    sys->n = n;
+    
+    sys->A = malloc(n * sizeof(double*));
+    for (int i = 0; i < n; i++) {
+        sys->A[i] = malloc(n * sizeof(double));
+    }
+    
+    sys->b = malloc(n * sizeof(double));
+    sys->x = malloc(n * sizeof(double));
+    
+    return sys;
+}
+
+/**
+ * Giải phóng bộ nhớ
+ */
+void free_system(LinearSystem *sys) {
+    if (!sys) return;
+    
+    for (int i = 0; i < sys->n; i++) {
+        free(sys->A[i]);
+    }
+    free(sys->A);
+    free(sys->b);
+    free(sys->x);
+    free(sys);
+}
+
+/**
+ * Tạo hệ phương trình test với ma trận dominant diagonal
+ */
+void generate_test_system(LinearSystem *sys) {
+    int n = sys->n;
+    
+    // Tạo ma trận A với đường chéo chính lớn (đảm bảo khả nghịch)
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n; j++) {
+            if (i == j) {
+                sys->A[i][j] = n + 10.0;  // Đường chéo chính lớn
+            } else {
+                sys->A[i][j] = 1.0 / (i + j + 1.0);  // Phần tử khác nhỏ
+            }
+        }
+    }
+    
+    // Tạo vector nghiệm x cố định: x[i] = i + 1
+    double *true_x = malloc(n * sizeof(double));
+    for (int i = 0; i < n; i++) {
+        true_x[i] = i + 1.0;
+    }
+    
+    // Tính b = A * x
+    for (int i = 0; i < n; i++) {
+        sys->b[i] = 0.0;
+        for (int j = 0; j < n; j++) {
+            sys->b[i] += sys->A[i][j] * true_x[j];
+        }
+    }
+    
+    free(true_x);
+}
+
+/**
+ * Kiểm tra tính đúng đắn nghiệm bằng cách tính A*x so với b
+ */
+int verify_solution(LinearSystem *sys) {
+    int n = sys->n;
+    double tolerance = 1e-9;
+    
+    for (int i = 0; i < n; i++) {
+        double sum = 0.0;
+        for (int j = 0; j < n; j++) {
+            sum += sys->A[i][j] * sys->x[j];
+        }
+        
+        if (fabs(sum - sys->b[i]) > tolerance) {
+            return 0;  // Nghiệm không chính xác
+        }
+    }
+    
+    return 1;  // Nghiệm chính xác
+}
 
 /**
  * Hàm tìm pivot lớn nhất trong phạm vi được gán
@@ -75,7 +179,7 @@ void* elimination_thread(void* arg) {
 }
 
 /**
- * Thuật toán Gaussian Elimination sử dụng Pthreads với mutex và join
+ * Thuật toán Gaussian Elimination sử dụng Pthreads
  */
 int gaussian_elimination_pthread(LinearSystem *sys, int num_threads) {
     int n = sys->n;
@@ -86,8 +190,8 @@ int gaussian_elimination_pthread(LinearSystem *sys, int num_threads) {
     // Thực hiện khử xuôi
     for (int k = 0; k < n - 1; k++) {
         // === PHASE 1: Tìm pivot song song ===
-        pthread_t *pivot_threads = (pthread_t*)malloc(num_threads * sizeof(pthread_t));
-        PivotThreadData *pivot_data = (PivotThreadData*)malloc(num_threads * sizeof(PivotThreadData));
+        pthread_t *pivot_threads = malloc(num_threads * sizeof(pthread_t));
+        PivotThreadData *pivot_data = malloc(num_threads * sizeof(PivotThreadData));
         
         int pivot_row = k;
         double pivot_value = fabs(sys->A[k][k]);
@@ -119,7 +223,7 @@ int gaussian_elimination_pthread(LinearSystem *sys, int num_threads) {
             }
         }
         
-        // Chờ tất cả threads tìm pivot hoàn thành bằng pthread_join
+        // Chờ tất cả threads tìm pivot hoàn thành
         for (int i = 0; i < num_threads; i++) {
             pthread_join(pivot_threads[i], NULL);
         }
@@ -129,7 +233,7 @@ int gaussian_elimination_pthread(LinearSystem *sys, int num_threads) {
         
         // Kiểm tra ma trận có khả nghịch không
         if (pivot_value < 1e-12) {
-            printf("Lỗi: Ma trận không khả nghịch (pivot = 0 tại bước %d)\n", k);
+            printf("Lỗi: Ma trận không khả nghịch (pivot ≈ 0)\n");
             pthread_mutex_destroy(&pivot_mutex);
             return 0;
         }
@@ -148,8 +252,8 @@ int gaussian_elimination_pthread(LinearSystem *sys, int num_threads) {
         }
         
         // === PHASE 2: Khử Gauss song song ===
-        pthread_t *elim_threads = (pthread_t*)malloc(num_threads * sizeof(pthread_t));
-        EliminationThreadData *elim_data = (EliminationThreadData*)malloc(num_threads * sizeof(EliminationThreadData));
+        pthread_t *elim_threads = malloc(num_threads * sizeof(pthread_t));
+        EliminationThreadData *elim_data = malloc(num_threads * sizeof(EliminationThreadData));
         
         // Chia công việc khử cho các luồng
         rows_per_thread = (n - k - 1) / num_threads;
@@ -180,7 +284,7 @@ int gaussian_elimination_pthread(LinearSystem *sys, int num_threads) {
             }
         }
         
-        // Chờ tất cả threads khử hoàn thành bằng pthread_join
+        // Chờ tất cả threads khử hoàn thành
         for (int i = 0; i < num_threads; i++) {
             if (elim_threads[i] != 0) {
                 pthread_join(elim_threads[i], NULL);
@@ -216,12 +320,40 @@ int gaussian_elimination_pthread(LinearSystem *sys, int num_threads) {
 }
 
 /**
- * Chương trình test phiên bản Pthreads
+ * In ma trận (chỉ khi n <= 10)
  */
-#ifndef LIB_MODE
+void print_matrix(LinearSystem *sys) {
+    int n = sys->n;
+    if (n > 10) return;
+    
+    printf("Ma trận A:\n");
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n; j++) {
+            printf("%8.2f ", sys->A[i][j]);
+        }
+        printf("\n");
+    }
+}
+
+/**
+ * In vector (chỉ khi n <= 10)
+ */
+void print_vector(double *v, int n, const char *name) {
+    if (n > 10) return;
+    
+    printf("%s: ", name);
+    for (int i = 0; i < n; i++) {
+        printf("%.2f ", v[i]);
+    }
+    printf("\n");
+}
+
+/**
+ * Chương trình chính
+ */
 int main(int argc, char *argv[]) {
-    int n = 100; // Kích thước mặc định
-    int num_threads = 4; // Số luồng mặc định
+    int n = 100;          // Kích thước mặc định
+    int num_threads = 4;  // Số luồng mặc định
     
     if (argc > 1) {
         n = atoi(argv[1]);
@@ -239,25 +371,18 @@ int main(int argc, char *argv[]) {
         }
     }
     
-    printf("=== PHIÊN BẢN PTHREADS - GAUSSIAN ELIMINATION ===\n");
+    printf("🧮 GAUSSIAN ELIMINATION - PHIÊN BẢN PTHREAD\n");
     printf("Kích thước ma trận: %d x %d\n", n, n);
     printf("Số luồng: %d\n\n", num_threads);
     
-    // Tạo hệ phương trình test
+    // Tạo hệ phương trình
     LinearSystem *sys = create_system(n);
-    if (!sys) {
-        printf("Lỗi: Không thể tạo hệ phương trình\n");
-        return 1;
-    }
-    
     generate_test_system(sys);
     
     // Hiển thị ma trận nếu nhỏ
     if (n <= 10) {
-        printf("Ma trận A:\n");
-        print_matrix(sys->A, n);
-        printf("Vector b: ");
-        print_vector(sys->b, n);
+        print_matrix(sys);
+        print_vector(sys->b, n, "Vector b");
         printf("\n");
     }
     
@@ -268,19 +393,18 @@ int main(int argc, char *argv[]) {
     int success = gaussian_elimination_pthread(sys, num_threads);
     
     clock_gettime(CLOCK_MONOTONIC, &end);
-    double execution_time = (end.tv_sec - start.tv_sec) + 
-                           (end.tv_nsec - start.tv_nsec) / 1e9;
+    double elapsed_time = (end.tv_sec - start.tv_sec) + 
+                         (end.tv_nsec - start.tv_nsec) / 1e9;
     
+    // In kết quả
     if (success) {
         printf("✅ Giải thành công!\n");
-        printf("⏱️  Thời gian thực hiện: %.6f giây\n", execution_time);
+        printf("⏱️  Thời gian thực hiện: %.6f giây\n", elapsed_time);
         
         if (n <= 10) {
-            printf("Nghiệm x: ");
-            print_vector(sys->x, n);
+            print_vector(sys->x, n, "Nghiệm x");
         }
         
-        // Kiểm tra tính đúng đắn
         if (verify_solution(sys)) {
             printf("✅ Nghiệm chính xác!\n");
         } else {
@@ -288,15 +412,15 @@ int main(int argc, char *argv[]) {
         }
         
         printf("\n📊 Thông tin hiệu năng:\n");
-        printf("   - Số luồng đã sử dụng: %d\n", num_threads);
-        printf("   - Thời gian: %.6f giây\n", execution_time);
+        printf("   - Số luồng: %d\n", num_threads);
+        printf("   - Thời gian: %.6f giây\n", elapsed_time);
+        
     } else {
-        printf("❌ Giải thất bại!\n");
+        printf("❌ Không thể giải hệ phương trình!\n");
     }
     
-    // Giải phóng bộ nhớ
+    // Dọn dẹp bộ nhớ
     free_system(sys);
     
     return success ? 0 : 1;
-}
-#endif 
+} 
